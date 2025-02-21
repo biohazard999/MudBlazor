@@ -4,20 +4,22 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Text;
+using System.Globalization;
+using System.Threading;
 using System.Threading.Tasks;
+using AngleSharp.Html.Dom;
 using Bunit;
 using FluentAssertions;
+using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using MudBlazor.UnitTests.Dummy;
 using MudBlazor.UnitTests.Mocks;
 using MudBlazor.UnitTests.TestComponents;
+using MudBlazor.UnitTests.TestComponents.FileUpload;
 using NUnit.Framework;
-using static Bunit.ComponentParameterFactory;
 
 namespace MudBlazor.UnitTests.Components
 {
@@ -25,12 +27,21 @@ namespace MudBlazor.UnitTests.Components
     public class FileUploadTests : BunitTest
     {
         /// <summary>
-        /// Verifies that T is a valid type
+        /// Verifies that invalid T values are logged using the provided ILogger
         /// </summary>
         [Test]
-        public void FileUpload_VerifyGenericTest()
+        public void InvalidTLogWarning_Test()
         {
-            //waiting for #5549
+            var provider = new MockLoggerProvider();
+            var logger = provider.CreateLogger(GetType().FullName) as MockLogger;
+            Context.Services.AddLogging(x => x.ClearProviders().AddProvider(provider)); //set up the logging provider
+            var comp = Context.RenderComponent<MudFileUpload<MudTextField<string>>>();
+
+            var entries = logger.GetEntries();
+            entries.Count.Should().Be(1);
+            entries[0].Level.Should().Be(LogLevel.Warning);
+            entries[0].Message.Should().Be(string.Format("T must be of type {0} or {1}",
+                typeof(IReadOnlyList<IBrowserFile>), typeof(IBrowserFile)));
         }
 
         /// <summary>
@@ -40,8 +51,8 @@ namespace MudBlazor.UnitTests.Components
         public void FileUpload_CSSTest()
         {
             var comp = Context.RenderComponent<MudFileUpload<IBrowserFile>>(parameters => parameters
-            .Add(x => x.Class, "outer-test")
-            .Add(x => x.InputClass, "inner-test"));
+                .Add(x => x.Class, "outer-test")
+                .Add(x => x.InputClass, "inner-test"));
 
             comp.Find(".mud-input-control.mud-file-upload.outer-test"); //find outer div
 
@@ -80,7 +91,7 @@ namespace MudBlazor.UnitTests.Components
         public void FileUpload_HiddenTest2()
         {
             var comp = Context.RenderComponent<MudFileUpload<IReadOnlyList<IBrowserFile>>>(parameters =>
-            parameters.Add(x => x.Hidden, false));
+                parameters.Add(x => x.Hidden, false));
 
             var input = comp.Find("input");
             input.HasAttribute("hidden").Should().BeFalse();
@@ -93,7 +104,7 @@ namespace MudBlazor.UnitTests.Components
         public void FileUpload_AcceptTest()
         {
             var comp = Context.RenderComponent<MudFileUpload<IBrowserFile>>(parameters => parameters
-            .Add(x => x.Accept, ".png, .jpg"));
+                .Add(x => x.Accept, ".png, .jpg"));
 
             var input = comp.Find("input");
             input.GetAttribute("accept").Should().Be(".png, .jpg");
@@ -103,16 +114,53 @@ namespace MudBlazor.UnitTests.Components
         /// Verifies the button template renders
         /// </summary>
         [Test]
-        public void FileUpload_ButtonTemplateTest()
+        public void FileUpload_ButtonTemplateContextTest_Renders()
         {
-            var comp = Context.RenderComponent<FileUploadButtonTemplateTest>();
+            var comp = Context.RenderComponent<FileUploadWithDragAndDropActivatorTest>();
 
-            var label = comp.Find("label");
-            label.ToMarkup().Should().Contain("Upload");
-            label.GetAttribute("for").Should().StartWith("mud_fileupload_"); //ensure button markup renders
+            var openFilePickerButton = comp.Find("button#open-file-picker-button");
+            openFilePickerButton.ToMarkup().Should().Contain("Open file picker");
 
-            var after = comp.Find(".mud-input-control-input-container div");
-            after.MarkupMatches("<div>Select Template</div>");
+            var clearButton = comp.Find("button#clear-button");
+            clearButton.ToMarkup().Should().Contain("Clear");
+        }
+
+        /// <summary>
+        /// Verifies the ClearAsync function clears the Files property
+        /// </summary>
+        [Test]
+        public async Task FileUpload_ClearAsync_Should_Clear_Files()
+        {
+            var fileName = "cat.jpg";
+            var defaultFile = new DummyBrowserFile(fileName, DateTimeOffset.Now, 0, "image/jpeg", []);
+            var comp = Context.RenderComponent<FileUploadWithDragAndDropActivatorTest>(
+                ComponentParameterFactory.Parameter(nameof(FileUploadWithDragAndDropActivatorTest.File), defaultFile));
+            var fileUploadComp = comp.FindComponent<MudFileUpload<IBrowserFile>>();
+            var fileUploadInstance = fileUploadComp.Instance;
+
+            fileUploadInstance.Files.Should().NotBeNull();
+            fileUploadInstance.Files!.Name.Should().Be(fileName);
+
+            await comp.InvokeAsync(() => comp.Find("button#clear-button").Click());
+
+            fileUploadInstance.Files.Should().BeNull();
+        }
+
+        /// <summary>
+        /// Verifies the OpenFilePickerAsync method opens the file picker when the file picker button is clicked
+        /// <remarks>
+        /// Native HTML buttons trigger the onclick event when the space or enter keys are pressed.
+        /// If users use something that does not render a native button, they will need to add the appropriate keyboard event handlers.
+        /// </remarks>
+        /// </summary>
+        [Test]
+        public async Task FileUpload_OpenFilePickerAsync_Should_OpenFilePicker_When_Clicked()
+        {
+            var comp = Context.RenderComponent<FileUploadWithDragAndDropActivatorTest>();
+
+            await comp.InvokeAsync(() => comp.Find("button#open-file-picker-button").Click());
+
+            Context.JSInterop.Invocations.Should().ContainSingle(invocation => invocation.Identifier == "mudFileUpload.openFilePicker");
         }
 
         /// <summary>
@@ -140,7 +188,11 @@ namespace MudBlazor.UnitTests.Components
         [Test]
         public async Task FileUpload_FileValueChangedTest()
         {
-            InputFileContent[] fileContent = { InputFileContent.CreateFromText("Garderoben is a farmer!", "upload.txt"), InputFileContent.CreateFromText("A Balrog, servant of Morgoth", "upload2.txt") };
+            InputFileContent[] fileContent =
+            {
+                InputFileContent.CreateFromText("Garderoben is a farmer!", "upload.txt"),
+                InputFileContent.CreateFromText("A Balrog, servant of Morgoth", "upload2.txt")
+            };
 
             var comp = Context.RenderComponent<FileUploadFormValidationTest>();
 
@@ -171,7 +223,14 @@ namespace MudBlazor.UnitTests.Components
         [Test]
         public async Task FileUpload_ValidationTest()
         {
-            InputFileContent[] fileContent = { InputFileContent.CreateFromText("Garderoben is a farmer!", "upload.txt"), InputFileContent.CreateFromText("A Balrog, servant of Morgoth", "upload2.txt") };
+            InputFileContent[] fileContent =
+            {
+                InputFileContent.CreateFromText("Garderoben is a farmer!", "upload.txt"),
+                InputFileContent.CreateFromText("A Balrog, servant of Morgoth", "upload2.txt")
+            };
+
+            Thread.CurrentThread.CurrentCulture = CultureInfo.InvariantCulture; //<<< rework this!
+            Thread.CurrentThread.CurrentUICulture = CultureInfo.InvariantCulture;
 
             var comp = Context.RenderComponent<FileUploadFormValidationTest>();
 
@@ -182,11 +241,11 @@ namespace MudBlazor.UnitTests.Components
 
             var single = comp.FindComponent<MudFileUpload<IBrowserFile>>();
             single.Instance.ErrorText.Should().Be("'File' must not be empty.");
-            single.Markup.Should().Contain("&#x27;File&#x27; must not be empty.");
+            single.Markup.Should().Contain("'File' must not be empty.");
 
             var multiple = comp.FindComponent<MudFileUpload<IReadOnlyList<IBrowserFile>>>();
             multiple.Instance.ErrorText.Should().Be("'Files' must not be empty.");
-            multiple.Markup.Should().Contain("&#x27;Files&#x27; must not be empty.");
+            multiple.Markup.Should().Contain("'Files' must not be empty.");
 
             var singleInput = single.FindComponent<InputFile>();
             singleInput.UploadFiles(fileContent[0]); //upload first file
@@ -194,7 +253,7 @@ namespace MudBlazor.UnitTests.Components
             await comp.InvokeAsync(() => form.Validate());
 
             single.Instance.ErrorText.Should().Be(null); //first input is now valid
-            single.Markup.Should().NotContain("&#x27;File&#x27; must not be empty.");
+            single.Markup.Should().NotContain("'File' must not be empty.");
 
             form.IsValid.Should().BeFalse(); //form is still invalid
 
@@ -204,26 +263,170 @@ namespace MudBlazor.UnitTests.Components
             await comp.InvokeAsync(() => form.Validate());
 
             single.Instance.ErrorText.Should().Be(null); //second input is now valid
-            single.Markup.Should().NotContain("&#x27;Files&#x27; must not be empty.");
+            single.Markup.Should().NotContain("'Files' must not be empty.");
 
             form.IsValid.Should().BeTrue(); //form is now valid
         }
 
         /// <summary>
-        /// Verifies that invalid T values are logged using the provided ILogger
+        /// Tests that more than 10 files can be uploaded
         /// </summary>
         [Test]
-        public void InvalidTLogWarning_Test()
+        public void FileUpload_MaximumFileCountTest()
         {
-            var provider = new MockLoggerProvider();
-            var logger = provider.CreateLogger(GetType().FullName) as MockLogger;
-            Context.Services.AddLogging(x => x.ClearProviders().AddProvider(provider)); //set up the logging provider
-            var comp = Context.RenderComponent<MudFileUpload<MudTextField<string>>>();
+            List<InputFileContent> Files = new();
+            for (var i = 0; i < 11; i++)
+            {
+                Files.Add(InputFileContent.CreateFromText("Garderoben is a farmer!", $"upload{i}.txt"));
+            }
 
-            var entries = logger.GetEntries();
-            entries.Count.Should().Be(1);
-            entries[0].Level.Should().Be(LogLevel.Warning);
-            entries[0].Message.Should().Be(string.Format("T must be of type {0} or {1}", typeof(IReadOnlyList<IBrowserFile>), typeof(IBrowserFile)));
+            Files.Count.Should().Be(11); //ensure there are 11 files
+
+            var comp = Context.RenderComponent<FileUploadMultipleFilesTest>();
+
+            var multiple = comp.FindComponent<MudFileUpload<IReadOnlyList<IBrowserFile>>>();
+            var multipleInput = multiple.FindComponent<InputFile>();
+            multipleInput.UploadFiles(Files.ToArray()); //upload second files
+
+            comp.Instance.Files.Count.Should()
+                .Be(11); //if no error occurs, we have successfully uploaded more than 10 files
+        }
+
+        /// <summary>
+        /// Makes sure the file upload is disabled
+        /// </summary>
+        [Test]
+        public void FileUploadDisabledTest()
+        {
+            var comp = Context.RenderComponent<FileUploadDisabledTest>();
+            comp.FindComponent<MudFileUpload<IBrowserFile>>().Find("input").HasAttribute("disabled").Should().BeFalse();
+            comp.FindComponent<MudFileUpload<IBrowserFile>>().Find("button").HasAttribute("disabled").Should().BeFalse();
+
+
+            comp.SetParametersAndRender(parameters =>
+                parameters.Add(x => x.Disabled,
+                    true)); //The input and child button should be disabled when file upload is disabled
+
+            comp.FindComponent<MudFileUpload<IBrowserFile>>().Find("input").HasAttribute("disabled").Should().BeTrue();
+            comp.FindComponent<MudFileUpload<IBrowserFile>>().Find("button").HasAttribute("disabled").Should()
+                .BeTrue(); //we need to test for a button as the MudButton replaces disabled labels with buttons
+        }
+
+        /// <summary>
+        /// Verifies files are appended correctly
+        /// </summary>
+        [Test]
+        [TestCase(true)]
+        [TestCase(false)]
+        public void FileUploadAppendMultipleTest(bool appendMultiple)
+        {
+            var comp = Context.RenderComponent<FileUploadAppendMultipleTest>(p =>
+                p.Add(x => x.AppendMultipleFiles, appendMultiple));
+
+            var input = comp.FindComponent<InputFile>();
+            input.UploadFiles(GenerateFile(), GenerateFile(), GenerateFile()); //upload first file
+            comp.Instance.Files.Count.Should().Be(3);
+
+            input.UploadFiles(GenerateFile());
+            comp.Instance.Files.Count.Should().Be(appendMultiple ? 4 : 1);
+
+            InputFileContent GenerateFile()
+            {
+                return InputFileContent.CreateFromText("snakex64 is Canadian", $"{Guid.NewGuid()}.txt");
+            }
+        }
+
+        /// <summary>
+        /// Optional FileUpload should not have required attribute and aria-required should be false.
+        /// </summary>
+        [Test]
+        public void OptionalFileUpload_Should_NotHaveRequiredAttributeAndAriaRequiredShouldBeFalse()
+        {
+            var comp = Context.RenderComponent<MudFileUpload<IBrowserFile>>();
+
+            comp.Find("input").HasAttribute("required").Should().BeFalse();
+            comp.Find("input").GetAttribute("aria-required").Should().Be("false");
+        }
+
+        /// <summary>
+        /// Required FileUpload should have required and aria-required attributes.
+        /// </summary>
+        [Test]
+        public void RequiredFileUpload_Should_HaveRequiredAndAriaRequiredAttributes()
+        {
+            var comp = Context.RenderComponent<MudFileUpload<IBrowserFile>>(parameters => parameters
+                .Add(p => p.Required, true));
+
+            comp.Find("input").HasAttribute("required").Should().BeTrue();
+            comp.Find("input").GetAttribute("aria-required").Should().Be("true");
+        }
+
+        /// <summary>
+        /// Required and aria-required FileUpload attributes should be dynamic.
+        /// </summary>
+        [Test]
+        public void RequiredAndAriaRequiredFileUploadAttributes_Should_BeDynamic()
+        {
+            var comp = Context.RenderComponent<MudFileUpload<IBrowserFile>>();
+
+            comp.Find("input").HasAttribute("required").Should().BeFalse();
+            comp.Find("input").GetAttribute("aria-required").Should().Be("false");
+
+            comp.SetParametersAndRender(parameters => parameters
+                .Add(p => p.Required, true));
+
+            comp.Find("input").HasAttribute("required").Should().BeTrue();
+            comp.Find("input").GetAttribute("aria-required").Should().Be("true");
+        }
+
+        /// <summary>
+        /// FileUpload should generate new InputFile on file change.
+        /// </summary>
+        [Test]
+        public async Task Generate_new_InputFile_on_file_change()
+        {
+            var comp = Context.RenderComponent<MudFileUpload<IBrowserFile>>();
+
+            // only 1 input element should be present
+            comp.FindAll("input").Should().HaveCount(1);
+
+            // trigger an OnChange on the internal InputFile
+            var defaultFile = new DummyBrowserFile("filename.jpg", DateTimeOffset.Now, 0, "image/jpeg", []);
+            await comp.InvokeAsync(() => comp.FindComponent<InputFile>().Instance.OnChange.InvokeAsync(new InputFileChangeEventArgs([defaultFile])));
+
+            // 2 input elements should now be present
+            // one should be visible
+            comp.FindAll("input:not(.d-none)").Should().HaveCount(1);
+            // and the other should no longer be visible
+            comp.FindAll("input.d-none").Should().HaveCount(1);
+        }
+
+        /// <summary>
+        /// FileUpload should trigger the FilesChanged and OnFilesChanged callbacks when appropriate.
+        /// </summary>
+        [Test]
+        public async Task Should_trigger_file_change_callbacks_as_expected()
+        {
+            var comp = Context.RenderComponent<FileUploadChangeCountTests>();
+
+            // first file change should trigger both callbacks
+            var fileContent = new byte[5];
+            // fill file content with random bytes
+            new Random().NextBytes(fileContent);
+            var firstFile = new DummyBrowserFile("filename.jpg", DateTimeOffset.Now, 0, "image/jpeg", fileContent);
+            await comp.InvokeAsync(() => comp.FindComponents<InputFile>()[0].Instance.OnChange.InvokeAsync(new InputFileChangeEventArgs([firstFile])));
+
+            comp.Instance.FilesChangedCount.Should().Be(1);
+            comp.Instance.OnFilesChangedCount.Should().Be(1);
+
+            // since a new InputFile is generated with each upload, we can get the last InputFile in the render chain to emulate a new upload
+            // so when a new file reference is uploaded, both file change callbacks should be triggered
+            new Random().NextBytes(fileContent);
+            var secondFile = new DummyBrowserFile("filename.jpg", DateTimeOffset.Now, 0, "image/jpeg", fileContent);
+            await comp.InvokeAsync(() => comp.FindComponents<InputFile>()[^1].Instance.OnChange.InvokeAsync(new InputFileChangeEventArgs([secondFile])));
+
+            comp.Instance.FilesChangedCount.Should().Be(2);
+            comp.Instance.OnFilesChangedCount.Should().Be(2);
         }
     }
 }
